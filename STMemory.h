@@ -1,5 +1,5 @@
 // STMemory.h
-// Read-only memory access. No writes to game memory at all.
+// Read-only memory access via vm_read_overwrite
 
 #ifndef STMemory_h
 #define STMemory_h
@@ -69,6 +69,7 @@ static inline STRot st_read_rot(uintptr_t addr) {
     return st_read_t<STRot>(addr);
 }
 
+// UTF-16 FString -> UTF-8
 static inline bool st_read_fstring(uintptr_t addr, char *out, size_t out_size) {
     uintptr_t data = st_read_ptr(addr + 0x00);
     int32_t count = st_read_i32(addr + 0x08);

@@ -31,9 +31,6 @@ jobs:
           sudo xcode-select -s /Applications/Xcode.app
           xcodebuild -version
 
-      # ============================================================
-      # AUTO-CLONE IMGUI (no need to commit it to your repo)
-      # ============================================================
       - name: Cache ImGui
         id: cache-imgui
         uses: actions/cache@v4
@@ -56,9 +53,6 @@ jobs:
           test -f imgui/backends/imgui_impl_metal.mm || (echo "imgui_impl_metal.mm missing" && exit 1)
           echo "All ImGui files present."
 
-      # ============================================================
-      # DOWNLOAD iOS SDK (reliable Theos SDK release)
-      # ============================================================
       - name: Cache Theos SDKs
         id: cache-sdks
         uses: actions/cache@v4
@@ -71,36 +65,25 @@ jobs:
         run: |
           mkdir -p ~/theos-sdks
           cd ~/theos-sdks
-          echo "Downloading Theos SDK archive..."
           curl -L -o sdks.tar.gz https://github.com/theos/sdks/archive/refs/heads/master.tar.gz
           tar -xzf sdks.tar.gz
           ls -la
-          # The tarball extracts to sdks-master/ containing all SDKs
           ls -la sdks-master/ | head -40
 
       - name: Prepare SDK path
         run: |
           mkdir -p $HOME/theos/sdks
-          # Copy all SDKs into theos/sdks
           if [ -d "$HOME/theos-sdks/sdks-master" ]; then
             cp -R $HOME/theos-sdks/sdks-master/* $HOME/theos/sdks/ 2>/dev/null || true
           fi
-          echo "Available SDKs:"
           ls -la $HOME/theos/sdks/ || true
 
-      # ============================================================
-      # INSTALL BUILD DEPS
-      # ============================================================
       - name: Install build dependencies
         run: |
           brew install ldid xz || true
 
-      # ============================================================
-      # COMPILE
-      # ============================================================
       - name: Compile dylib
         run: |
-          # Pick the best available SDK
           SDK_PATH=""
           for candidate in \
               "$HOME/theos/sdks/iPhoneOS16.5.sdk" \
@@ -113,7 +96,6 @@ jobs:
             fi
           done
 
-          # Fallback to xcrun's iPhoneOS SDK
           if [ -z "$SDK_PATH" ]; then
             SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null)
           fi
@@ -129,14 +111,13 @@ jobs:
 
           OBJ_FILES=""
 
-          # --- Compile our source files ---
           for src in ./STEntry.mm ./STMenu.mm; do
             if [ ! -f "$src" ]; then
-              echo "WARN: $src not found, skipping"
+              echo "WARN: $src missing"
               continue
             fi
             obj="build_output/$(basename ${src%.mm}).o"
-            echo "Compiling $src -> $obj"
+            echo "Compiling $src"
             clang++ -c \
               -arch arm64 \
               -arch arm64e \
@@ -155,7 +136,6 @@ jobs:
             OBJ_FILES="$OBJ_FILES $obj"
           done
 
-          # --- Compile ImGui core + backends ---
           for src in \
               imgui/imgui.cpp \
               imgui/imgui_draw.cpp \
@@ -163,11 +143,11 @@ jobs:
               imgui/imgui_widgets.cpp \
               imgui/backends/imgui_impl_metal.mm; do
             if [ ! -f "$src" ]; then
-              echo "WARN: $src not found, skipping"
+              echo "WARN: $src missing"
               continue
             fi
             obj="build_output/$(basename ${src%.*}).o"
-            echo "Compiling $src -> $obj"
+            echo "Compiling $src"
             clang++ -c \
               -arch arm64 \
               -arch arm64e \
@@ -185,14 +165,7 @@ jobs:
             OBJ_FILES="$OBJ_FILES $obj"
           done
 
-          echo ""
-          echo "Object files compiled:"
-          echo "$OBJ_FILES"
-          ls -la build_output/
-
-          # --- Link ---
-          echo ""
-          echo "Linking dylib..."
+          echo "Linking..."
           clang++ -dynamiclib \
             -arch arm64 \
             -arch arm64e \
@@ -209,13 +182,11 @@ jobs:
             -o build_output/${{ env.DYLIB_NAME }}.dylib \
             $OBJ_FILES
 
-          echo "Built:"
           file build_output/${{ env.DYLIB_NAME }}.dylib
 
       - name: Sign dylib with ldid (ad-hoc)
         run: |
           ldid -S build_output/${{ env.DYLIB_NAME }}.dylib || true
-          echo "Signed (ad-hoc)."
 
       - name: Verify output
         run: |

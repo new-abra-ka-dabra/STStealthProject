@@ -1,6 +1,5 @@
 // STStealth.h
 // Disguised as a system image loader helper to blend with iOS dyld cache
-// DO NOT name this anything with esp / cheat / hack / menu in it.
 
 #ifndef STStealth_h
 #define STStealth_h
@@ -19,7 +18,6 @@
 // ============================================================
 // STRING OBFUSCATION - compile-time XOR
 // ============================================================
-
 #define XSTR_KEY 0x5A
 
 static inline void st_xor(char *s, size_t len) {
@@ -34,9 +32,8 @@ static inline void st_xor(char *s, size_t len) {
 })
 
 // ============================================================
-// ANTI-DEBUG / ANTI-TRACE
+// ANTI-DEBUG
 // ============================================================
-
 static inline int st_anti_debug(void) {
     int mib[4];
     struct kinfo_proc info;
@@ -51,9 +48,8 @@ static inline int st_anti_debug(void) {
 }
 
 // ============================================================
-// DISGUISED NAME - hides our dylib from _dyld_image_count
+// DYLD IMAGE HIDING
 // ============================================================
-
 struct st_hidden_image {
     const struct mach_header *header;
     const char *path;
@@ -80,44 +76,8 @@ static inline void st_hide_image(const struct mach_header *mh) {
 }
 
 // ============================================================
-// DYLD HOOKS - intercept image enumeration
+// DELAYED LOAD (kept for compatibility, unused now)
 // ============================================================
-
-typedef uint32_t (*dyld_image_count_t)(void);
-typedef const char* (*dyld_get_image_name_t)(uint32_t);
-typedef const struct mach_header* (*dyld_get_image_header_t)(uint32_t);
-
-static dyld_image_count_t orig_dyld_image_count = NULL;
-static dyld_get_image_name_t orig_dyld_get_image_name = NULL;
-static dyld_get_image_header_t orig_dyld_get_image_header = NULL;
-
-static uint32_t hook_dyld_image_count(void) {
-    uint32_t real = orig_dyld_image_count ? orig_dyld_image_count() : 0;
-    return real - (st_hidden_list ? 1 : 0);
-}
-
-static const char* hook_dyld_get_image_name(uint32_t idx) {
-    if (!orig_dyld_get_image_name) return NULL;
-    uint32_t real_idx = idx;
-    if (st_hidden_list && idx >= 0) {
-        real_idx = idx + 1;
-    }
-    return orig_dyld_get_image_name(real_idx);
-}
-
-static const struct mach_header* hook_dyld_get_image_header(uint32_t idx) {
-    if (!orig_dyld_get_image_header) return NULL;
-    uint32_t real_idx = idx;
-    if (st_hidden_list && idx >= 0) {
-        real_idx = idx + 1;
-    }
-    return orig_dyld_get_image_header(real_idx);
-}
-
-// ============================================================
-// DELAYED LOAD - wait for ACE initial scan to finish
-// ============================================================
-
 static inline void st_delay_load(void) {
     srand((unsigned)time(NULL) ^ getpid());
     int delay = 10 + (rand() % 9);
@@ -125,9 +85,8 @@ static inline void st_delay_load(void) {
 }
 
 // ============================================================
-// MEMORY PROTECTION - wipe our Mach-O header
+// MACH-O HEADER WIPE
 // ============================================================
-
 static inline void st_wipe_header(void) {
     Dl_info info;
     if (dladdr((void*)&st_wipe_header, &info)) {

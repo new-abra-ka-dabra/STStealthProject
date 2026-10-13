@@ -1,15 +1,23 @@
 // STMenu.mm
-// ImGui menu for iOS. Floating button, ESP toggle, close button.
+// ImGui menu for iOS with proper Metal backend init, font atlas
+// build, and safe render loop.
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CADisplayLink.h>
+#import <objc/runtime.h>
+#include <os/log.h>
 
 #include "imgui.h"
 #include "imgui_impl_metal.h"
 #include "STESP.h"
 
+#define STLOG(fmt, ...) os_log(OS_LOG_DEFAULT, "[STStealth] " fmt, ##__VA_ARGS__)
+
+// ============================================================
+// GLOBAL STATE
+// ============================================================
 static bool g_menuOpen = false;
 static bool g_espEnabled = false;
 static bool g_espBox = true;
@@ -25,6 +33,9 @@ static ImVec2 g_dragOffset;
 static float g_screenW = 0;
 static float g_screenH = 0;
 
+// ============================================================
+// OVERLAY VIEW
+// ============================================================
 @interface STOverlayView : UIView
 @end
 
@@ -45,12 +56,17 @@ static float g_screenH = 0;
 }
 
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    CGFloat bx = g_buttonPos.x;
-    CGFloat by = g_buttonPos.y;
-    CGFloat bw = 60;
-    CGFloat bh = 60;
-    if (point.x >= bx && point.x <= bx + bw && point.y >= by && point.y <= by + bh) {
+    CGFloat bx = g_buttonPos.x, by = g_buttonPos.y, bs = 60;
+    if (point.x >= bx && point.x <= bx + bs && point.y >= by && point.y <= by + bs) {
         return self;
+    }
+    if (g_menuOpen) {
+        CGFloat mw = 280, mh = 320;
+        CGFloat mx = g_screenW * 0.5f - mw * 0.5f;
+        CGFloat my = g_screenH * 0.5f - mh * 0.5f;
+        if (point.x >= mx && point.x <= mx + mw && point.y >= my && point.y <= my + mh) {
+            return self;
+        }
     }
     return nil;
 }
@@ -59,7 +75,6 @@ static float g_screenH = 0;
     UITouch *t = [touches anyObject];
     CGPoint p = [t locationInView:self];
     CGFloat bx = g_buttonPos.x, by = g_buttonPos.y, bs = 60;
-
     if (p.x >= bx && p.x <= bx + bs && p.y >= by && p.y <= by + bs) {
         g_buttonDragging = true;
         g_dragOffset = ImVec2(p.x - bx, p.y - by);
@@ -79,7 +94,6 @@ static float g_screenH = 0;
     UITouch *t = [touches anyObject];
     CGPoint p = [t locationInView:self];
     CGFloat bx = g_buttonPos.x, by = g_buttonPos.y, bs = 60;
-
     if (p.x >= bx && p.x <= bx + bs && p.y >= by && p.y <= by + bs) {
         g_menuOpen = !g_menuOpen;
     }
@@ -89,7 +103,7 @@ static float g_screenH = 0;
 @end
 
 // ============================================================
-// Render loop target object (proper CADisplayLink target)
+// RENDER TARGET
 // ============================================================
 @interface STMenuRenderer : NSObject
 - (void)render:(CADisplayLink *)link;
@@ -113,7 +127,17 @@ static CADisplayLink *g_displayLink = nil;
             g_screenH = bounds.size.height;
         }
 
-        ImGui_ImplMetal_NewFrame(NULL);
+        CAMetalLayer *layer = (CAMetalLayer *)g_overlay.layer;
+        id<CAMetalDrawable> drawable = [layer nextDrawable];
+        if (!drawable) return;
+
+        MTLRenderPassDescriptor *desc = [MTLRenderPassDescriptor renderPassDescriptor];
+        desc.colorAttachments[0].texture = drawable.texture;
+        desc.colorAttachments[0].loadAction = MTLLoadActionClear;
+        desc.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+        desc.colorAttachments[0].storeAction = MTLStoreActionStore;
+
+        ImGui_ImplMetal_NewFrame(desc);
         ImGui::NewFrame();
 
         // Floating button
@@ -125,7 +149,8 @@ static CADisplayLink *g_displayLink = nil;
             ImGui::Begin("##stbtn", nullptr,
                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoMove |
-                ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
+                ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus |
+                ImGuiWindowFlags_NoInputs);
             ImGui::SetCursorPos(ImVec2(18, 18));
             ImGui::TextColored(ImVec4(1,1,1,1), "ST");
             ImGui::End();
@@ -142,16 +167,16 @@ static CADisplayLink *g_displayLink = nil;
                 float fov;
                 if (st_get_camera(camLoc, camRot, fov)) {
                     uintptr_t gameState = st_read_ptr(world + OFF_WORLD_GAMESTATE);
-                    if (gameState) {
+                    if (gameState && gameState > 0x1000) {
                         uintptr_t playerArray = st_read_ptr(gameState + OFF_GAMESTATE_PLAYERARRAY);
-                        if (playerArray) {
+                        if (playerArray && playerArray > 0x1000) {
                             uintptr_t arrData = st_read_ptr(playerArray + OFF_TARRAY_DATA);
                             int32_t arrCount = st_read_i32(playerArray + OFF_TARRAY_COUNT);
-                            if (arrData && arrCount > 0 && arrCount < 200) {
+                            if (arrData && arrData > 0x1000 && arrCount > 0 && arrCount < 200) {
                                 ImDrawList *draw = ImGui::GetBackgroundDrawList();
                                 for (int i = 0; i < arrCount; i++) {
                                     uintptr_t ps = st_read_ptr(arrData + i * 8);
-                                    if (!ps) continue;
+                                    if (!ps || ps < 0x1000) continue;
                                     STPlayerData pd;
                                     st_read_player(ps, pd);
                                     if (!pd.valid) continue;
@@ -161,6 +186,7 @@ static CADisplayLink *g_displayLink = nil;
                                     if (!st_world_to_screen(pd.feetPos, camLoc, camRot, fov, g_screenW, g_screenH, fx, fy)) continue;
 
                                     float boxH = fy - hy;
+                                    if (boxH < 2.0f || boxH > 2000.0f) continue;
                                     float boxW = boxH * 0.5f;
                                     float left = hx - boxW * 0.5f;
                                     float right = hx + boxW * 0.5f;
@@ -205,12 +231,12 @@ static CADisplayLink *g_displayLink = nil;
             }
         }
 
-        // Menu window
+        // Menu
         if (g_menuOpen) {
             ImGui::SetNextWindowSize(ImVec2(280, 320), ImGuiCond_FirstUseEver);
             ImGui::SetNextWindowPos(ImVec2(g_screenW * 0.5f - 140, g_screenH * 0.5f - 160),
                                     ImGuiCond_FirstUseEver);
-            ImGui::Begin("ShadowTracker Menu", &g_menuOpen,
+            ImGui::Begin("ST Menu", &g_menuOpen,
                          ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize);
 
             ImGui::Text("ESP Settings");
@@ -230,52 +256,83 @@ static CADisplayLink *g_displayLink = nil;
 
         ImGui::Render();
 
-        CAMetalLayer *layer = (CAMetalLayer *)g_overlay.layer;
-        id<CAMetalDrawable> drawable = [layer nextDrawable];
-        if (drawable) {
-            MTLRenderPassDescriptor *desc = [MTLRenderPassDescriptor renderPassDescriptor];
-            desc.colorAttachments[0].texture = drawable.texture;
-            desc.colorAttachments[0].loadAction = MTLLoadActionClear;
-            desc.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
-            desc.colorAttachments[0].storeAction = MTLStoreActionStore;
-
-            id<MTLCommandBuffer> cmd = [g_queue commandBuffer];
-            id<MTLRenderCommandEncoder> enc = [cmd renderCommandEncoderWithDescriptor:desc];
-            ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), cmd, enc);
-            [enc endEncoding];
-            [cmd presentDrawable:drawable];
-            [cmd commit];
-        }
+        id<MTLCommandBuffer> cmd = [g_queue commandBuffer];
+        id<MTLRenderCommandEncoder> enc = [cmd renderCommandEncoderWithDescriptor:desc];
+        ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), cmd, enc);
+        [enc endEncoding];
+        [cmd presentDrawable:drawable];
+        [cmd commit];
     }
 }
 
 @end
 
+// ============================================================
+// PUBLIC START
+// ============================================================
 void st_start_menu(void) {
+    STLOG("st_start_menu called");
     dispatch_async(dispatch_get_main_queue(), ^{
         UIWindow *keyWindow = nil;
         for (UIWindow *w in [UIApplication sharedApplication].windows) {
-            if (w.isKeyWindow) { keyWindow = w; break; }
+            if (w.isKeyWindow && !w.hidden && w.alpha > 0.5) {
+                keyWindow = w;
+                break;
+            }
         }
-        if (!keyWindow) return;
+        if (!keyWindow) {
+            STLOG("no valid key window");
+            return;
+        }
+        if (keyWindow.bounds.size.width < 100) {
+            STLOG("key window too small");
+            return;
+        }
+
+        STLOG("key window: %@", NSStringFromCGRect(keyWindow.bounds));
+
+        g_screenW = keyWindow.bounds.size.width;
+        g_screenH = keyWindow.bounds.size.height;
 
         g_overlay = [[STOverlayView alloc] initWithFrame:keyWindow.bounds];
+        if (!g_overlay) {
+            STLOG("overlay alloc failed");
+            return;
+        }
         [keyWindow addSubview:g_overlay];
 
         g_device = MTLCreateSystemDefaultDevice();
+        if (!g_device) {
+            STLOG("metal device nil");
+            return;
+        }
         g_queue = [g_device newCommandQueue];
+        if (!g_queue) {
+            STLOG("command queue nil");
+            return;
+        }
 
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
         ImGuiIO &io = ImGui::GetIO();
-        io.DisplaySize = ImVec2(keyWindow.bounds.size.width, keyWindow.bounds.size.height);
+        io.DisplaySize = ImVec2(g_screenW, g_screenH);
         io.Fonts->AddFontDefault();
+        io.Fonts->Build();  // <-- CRITICAL FIX
 
-        ImGui_ImplMetal_Init(g_device);
+        if (!ImGui_ImplMetal_Init(g_device)) {
+            STLOG("ImGui_ImplMetal_Init failed");
+            return;
+        }
 
         g_renderer = [[STMenuRenderer alloc] init];
         g_displayLink = [CADisplayLink displayLinkWithTarget:g_renderer
                                                     selector:@selector(render:)];
+        if (!g_displayLink) {
+            STLOG("display link nil");
+            return;
+        }
         [g_displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSDefaultRunLoopMode];
+
+        STLOG("=== MENU STARTED ===");
     });
 }

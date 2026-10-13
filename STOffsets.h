@@ -1,8 +1,12 @@
 // STOffsets.h
+// ShadowTrackerExtra / PUBG Mobile 4.6.0 (21520) - arm64
+// WARNING: These offsets may not match your game version.
+// Verify with a class dumper before trusting.
+
 #ifndef STOffsets_h
 #define STOffsets_h
 
-// Global engine pointers
+// Global engine pointers (VERIFY FOR YOUR BUILD)
 #define OFF_GENGINE    0x109CD42A0
 #define OFF_GNAMES     0x109888A70
 #define OFF_GOBJECTS   0x109ABC718

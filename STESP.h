@@ -24,33 +24,37 @@ static uintptr_t st_get_world(void) {
     uintptr_t base = st_get_ue4_base();
     if (!base) return 0;
     uintptr_t engine = st_read_ptr(base + OFF_GENGINE);
-    if (!engine) return 0;
+    if (!engine || engine < 0x1000) return 0;
     uintptr_t viewport = st_read_ptr(engine + OFF_UENGINE_GAMEVIEWPORT);
-    if (!viewport) return 0;
-    return st_read_ptr(viewport + OFF_GAMEVIEWPORT_WORLD);
+    if (!viewport || viewport < 0x1000) return 0;
+    uintptr_t world = st_read_ptr(viewport + OFF_GAMEVIEWPORT_WORLD);
+    if (!world || world < 0x1000) return 0;
+    return world;
 }
 
 static uintptr_t st_get_local_player_controller(void) {
     uintptr_t base = st_get_ue4_base();
     if (!base) return 0;
     uintptr_t engine = st_read_ptr(base + OFF_GENGINE);
-    if (!engine) return 0;
+    if (!engine || engine < 0x1000) return 0;
     uintptr_t viewport = st_read_ptr(engine + OFF_UENGINE_GAMEVIEWPORT);
-    if (!viewport) return 0;
+    if (!viewport || viewport < 0x1000) return 0;
     uintptr_t gameInstance = st_read_ptr(viewport + OFF_GAMEVIEWPORT_GAMEINSTANCE);
-    if (!gameInstance) return 0;
+    if (!gameInstance || gameInstance < 0x1000) return 0;
     uintptr_t localPlayers = st_read_ptr(gameInstance + OFF_GAMEINSTANCE_LOCALPLAYERS);
-    if (!localPlayers) return 0;
+    if (!localPlayers || localPlayers < 0x1000) return 0;
     uintptr_t lp0 = st_read_ptr(localPlayers + OFF_TARRAY_DATA);
-    if (!lp0) return 0;
-    return st_read_ptr(lp0 + OFF_LOCALPLAYER_PLAYERCONTROLLER);
+    if (!lp0 || lp0 < 0x1000) return 0;
+    uintptr_t pc = st_read_ptr(lp0 + OFF_LOCALPLAYER_PLAYERCONTROLLER);
+    if (!pc || pc < 0x1000) return 0;
+    return pc;
 }
 
 static bool st_get_camera(STVec3 &camLoc, STRot &camRot, float &fov) {
     uintptr_t pc = st_get_local_player_controller();
     if (!pc) return false;
     uintptr_t camMgr = st_read_ptr(pc + OFF_PLAYERCONTROLLER_CAMERAMANAGER);
-    if (!camMgr) return false;
+    if (!camMgr || camMgr < 0x1000) return false;
 
     camLoc.x = st_read_float(camMgr + OFF_CAM_X);
     camLoc.y = st_read_float(camMgr + OFF_CAM_Y);
@@ -60,7 +64,11 @@ static bool st_get_camera(STVec3 &camLoc, STRot &camRot, float &fov) {
     camRot.roll = st_read_float(camMgr + OFF_CAM_ROLL);
     fov = st_read_float(camMgr + OFF_CAM_FOV);
 
-    return camLoc.x != 0 && camLoc.y != 0;
+    // sanity
+    if (camLoc.x == 0 && camLoc.y == 0 && camLoc.z == 0) return false;
+    if (fov < 1.0f || fov > 179.0f) fov = 90.0f;
+    if (camRot.pitch < -180.0f || camRot.pitch > 180.0f) return false;
+    return true;
 }
 
 static bool st_world_to_screen(const STVec3 &world, const STVec3 &camLoc,
@@ -70,6 +78,11 @@ static bool st_world_to_screen(const STVec3 &world, const STVec3 &camLoc,
     float dx = world.x - camLoc.x;
     float dy = world.y - camLoc.y;
     float dz = world.z - camLoc.z;
+
+    // Guard against huge garbage values (wrong offsets producing garbage)
+    if (dx > 1e6f || dx < -1e6f) return false;
+    if (dy > 1e6f || dy < -1e6f) return false;
+    if (dz > 1e6f || dz < -1e6f) return false;
 
     float p = camRot.pitch * (float)M_PI / 180.0f;
     float y = camRot.yaw   * (float)M_PI / 180.0f;
@@ -95,37 +108,49 @@ static bool st_world_to_screen(const STVec3 &world, const STVec3 &camLoc,
 
     float fovRad = fov * (float)M_PI / 180.0f;
     float tanHalf = tanf(fovRad * 0.5f);
+    if (tanHalf < 0.001f) return false;
 
     float screenX = (y3 / x3) / (tanHalf * (screenW / screenH)) * 0.5f + 0.5f;
     float screenY = 0.5f - (z3 / x3) / tanHalf * 0.5f;
 
     outX = screenX * screenW;
     outY = screenY * screenH;
+
+    // Clamp to reasonable screen bounds
+    if (outX < -10000 || outX > 10000) return false;
+    if (outY < -10000 || outY > 10000) return false;
     return true;
 }
 
 static void st_read_player(uintptr_t playerState, STPlayerData &out) {
     memset(&out, 0, sizeof(out));
     out.playerState = playerState;
-    if (!playerState) return;
+    if (!playerState || playerState < 0x1000) return;
 
     st_read_fstring(playerState + OFF_PS_PLAYERNAME, out.name, sizeof(out.name));
     out.health = st_read_float(playerState + OFF_PS_PLAYERHEALTH);
     out.healthMax = st_read_float(playerState + OFF_PS_PLAYERHEALTHMAX);
     out.character = st_read_ptr(playerState + OFF_PS_CHARACTEROWNER);
-    if (!out.character) return;
+    if (!out.character || out.character < 0x1000) return;
 
     uintptr_t mesh = st_read_ptr(out.character + OFF_CHAR_MESH);
-    if (!mesh) return;
+    if (!mesh || mesh < 0x1000) return;
 
     uintptr_t bonesData = st_read_ptr(mesh + OFF_MESH_CACHEDBONESPACE + OFF_TARRAY_DATA);
-    if (!bonesData) return;
+    if (!bonesData || bonesData < 0x1000) return;
 
     uintptr_t headTransform = bonesData + (BONE_HEAD * 0x30);
     out.headPos = st_read_vec3(headTransform + OFF_TRANSFORM_TRANSLATION);
 
     uintptr_t pelvisTransform = bonesData + (BONE_PELVIS * 0x30);
     out.feetPos = st_read_vec3(pelvisTransform + OFF_TRANSFORM_TRANSLATION);
+
+    // Sanity: player must be within a few km
+    float adx = fabsf(out.headPos.x);
+    float ady = fabsf(out.headPos.y);
+    float adz = fabsf(out.headPos.z);
+    if (adx > 1e6f || ady > 1e6f || adz > 1e6f) return;
+    if (adx < 0.001f && ady < 0.001f && adz < 0.001f) return;
 
     out.valid = true;
 }
