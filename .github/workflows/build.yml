@@ -1,0 +1,188 @@
+name: Build STStealth Dylib
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  DYLIB_NAME: libSTStealth
+  IOS_MIN: "14.0"
+
+jobs:
+  build:
+    name: Build iOS Dylib on macOS
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Show Xcode version and SDKs
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks
+
+      - name: Select latest Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app
+          xcodebuild -version
+
+      - name: Cache Theos
+        id: cache-theos
+        uses: actions/cache@v4
+        with:
+          path: ~/theos
+          key: ${{ runner.os }}-theos-${{ hashFiles('.github/workflows/build.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-theos-
+
+      - name: Install Theos
+        if: steps.cache-theos.outputs.cache-hit != 'true'
+        run: |
+          export THEOS=~/theos
+          git clone --recursive https://github.com/theos/theos.git $THEOS
+          echo "THEOS=$THEOS" >> $GITHUB_ENV
+
+      - name: Set Theos environment
+        run: |
+          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+          echo "$HOME/theos/bin" >> $GITHUB_PATH
+
+      - name: Install Theos dependencies
+        run: |
+          brew install ldid xz || true
+          brew install dpkg || true
+
+      - name: Download iOS SDK (device, not simulator)
+        run: |
+          mkdir -p $HOME/theos/sdks
+          cd $HOME/theos/sdks
+
+          if [ ! -d "iPhoneOS16.5.sdk" ]; then
+            curl -L -o iPhoneOS16.5.sdk.tar.xz \
+              https://github.com/theos/sdks/releases/download/master/iPhoneOS16.5.sdk.tar.xz || \
+            curl -L -o iPhoneOS16.5.sdk.tar.xz \
+              https://github.com/xamarin/xamarin-macios/raw/main/sdks/iPhoneOS16.5.sdk.tar.xz || \
+            echo "SDK download failed, Theos will try to fetch on demand"
+            tar -xf iPhoneOS16.5.sdk.tar.xz 2>/dev/null || true
+          fi
+
+          ls -la $HOME/theos/sdks/
+
+      - name: Prepare project structure
+        run: |
+          mkdir -p build_output
+          echo "Project files:"
+          find . -maxdepth 3 -type f | head -50
+
+      - name: Compile dylib
+        run: |
+          SDK_PATH="$HOME/theos/sdks/iPhoneOS16.5.sdk"
+          if [ ! -d "$SDK_PATH" ]; then
+            SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null || echo "")
+          fi
+
+          echo "Using SDK: $SDK_PATH"
+
+          if [ -z "$SDK_PATH" ] || [ ! -d "$SDK_PATH" ]; then
+            echo "No iOS device SDK found. Trying xcrun..."
+            SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null)
+          fi
+
+          if [ -z "$SDK_PATH" ]; then
+            echo "ERROR: No iOS SDK available"
+            exit 1
+          fi
+
+          echo "Final SDK path: $SDK_PATH"
+
+          SRC_FILES=$(find . -maxdepth 1 -name "*.mm")
+          OBJ_FILES=""
+
+          for src in $SRC_FILES; do
+            obj="build_output/$(basename ${src%.mm}).o"
+            echo "Compiling $src -> $obj"
+            clang++ -c \
+              -arch arm64 \
+              -arch arm64e \
+              -isysroot "$SDK_PATH" \
+              -miphoneos-version-min=${{ env.IOS_MIN }} \
+              -fobjc-arc \
+              -fmodules \
+              -std=c++17 \
+              -I. \
+              -I./imgui \
+              -I./imgui/backends \
+              -DIMGUI_IMPL_METAL \
+              -O2 \
+              -fvisibility=hidden \
+              -o "$obj" \
+              "$src"
+            OBJ_FILES="$OBJ_FILES $obj"
+          done
+
+          IMGUI_SRCS="imgui/imgui.cpp imgui/imgui_draw.cpp imgui/imgui_tables.cpp imgui/imgui_widgets.cpp imgui/backends/imgui_impl_metal.mm"
+          for src in $IMGUI_SRCS; do
+            if [ -f "$src" ]; then
+              obj="build_output/$(basename ${src%.*}).o"
+              echo "Compiling $src -> $obj"
+              if [[ "$src" == *.mm ]]; then
+                clang++ -c -arch arm64 -arch arm64e -isysroot "$SDK_PATH" \
+                  -miphoneos-version-min=${{ env.IOS_MIN }} -fobjc-arc -fmodules -std=c++17 \
+                  -I. -I./imgui -I./imgui/backends -DIMGUI_IMPL_METAL -O2 \
+                  -o "$obj" "$src"
+              else
+                clang++ -c -arch arm64 -arch arm64e -isysroot "$SDK_PATH" \
+                  -miphoneos-version-min=${{ env.IOS_MIN }} -fmodules -std=c++17 \
+                  -I. -I./imgui -I./imgui/backends -DIMGUI_IMPL_METAL -O2 \
+                  -o "$obj" "$src"
+              fi
+              OBJ_FILES="$OBJ_FILES $obj"
+            else
+              echo "Skipping missing: $src"
+            fi
+          done
+
+          echo "Object files: $OBJ_FILES"
+
+          clang++ -dynamiclib \
+            -arch arm64 \
+            -arch arm64e \
+            -isysroot "$SDK_PATH" \
+            -miphoneos-version-min=${{ env.IOS_MIN }} \
+            -framework Foundation \
+            -framework UIKit \
+            -framework Metal \
+            -framework QuartzCore \
+            -framework CoreGraphics \
+            -install_name @rpath/${{ env.DYLIB_NAME }}.dylib \
+            -compatibility_version 1.0.0 \
+            -current_version 1.0.0 \
+            -o build_output/${{ env.DYLIB_NAME }}.dylib \
+            $OBJ_FILES
+
+      - name: Sign dylib with ldid (ad-hoc)
+        run: |
+          ldid -S build_output/${{ env.DYLIB_NAME }}.dylib || true
+          echo "Signed (ad-hoc):"
+          ldid -e build_output/${{ env.DYLIB_NAME }}.dylib | head -20 || true
+
+      - name: Verify output
+        run: |
+          file build_output/${{ env.DYLIB_NAME }}.dylib
+          lipo -info build_output/${{ env.DYLIB_NAME }}.dylib || true
+          otool -L build_output/${{ env.DYLIB_NAME }}.dylib || true
+          ls -la build_output/
+
+      - name: Upload dylib artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: STStealth-dylib
+          path: build_output/*.dylib
+          retention-days: 30
+          if-no-files-found: error
