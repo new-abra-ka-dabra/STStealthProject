@@ -10,6 +10,7 @@ on:
 env:
   DYLIB_NAME: libSTStealth
   IOS_MIN: "14.0"
+  IMGUI_VERSION: "v1.90.4"
 
 jobs:
   build:
@@ -19,8 +20,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Show Xcode version and SDKs
         run: |
@@ -32,79 +31,110 @@ jobs:
           sudo xcode-select -s /Applications/Xcode.app
           xcodebuild -version
 
-      - name: Cache Theos
-        id: cache-theos
+      # ============================================================
+      # AUTO-CLONE IMGUI (no need to commit it to your repo)
+      # ============================================================
+      - name: Cache ImGui
+        id: cache-imgui
         uses: actions/cache@v4
         with:
-          path: ~/theos
-          key: ${{ runner.os }}-theos-${{ hashFiles('.github/workflows/build.yml') }}
-          restore-keys: |
-            ${{ runner.os }}-theos-
+          path: imgui
+          key: imgui-${{ env.IMGUI_VERSION }}
 
-      - name: Install Theos
-        if: steps.cache-theos.outputs.cache-hit != 'true'
+      - name: Clone ImGui
+        if: steps.cache-imgui.outputs.cache-hit != 'true'
         run: |
-          export THEOS=~/theos
-          git clone --recursive https://github.com/theos/theos.git $THEOS
-          echo "THEOS=$THEOS" >> $GITHUB_ENV
+          git clone --depth 1 --branch ${{ env.IMGUI_VERSION }} \
+            https://github.com/ocornut/imgui.git imgui
+          ls -la imgui/
+          ls -la imgui/backends/ | head -30
 
-      - name: Set Theos environment
+      - name: Verify ImGui files present
         run: |
-          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
-          echo "$HOME/theos/bin" >> $GITHUB_PATH
+          test -f imgui/imgui.h || (echo "imgui.h missing" && exit 1)
+          test -f imgui/imgui.cpp || (echo "imgui.cpp missing" && exit 1)
+          test -f imgui/backends/imgui_impl_metal.mm || (echo "imgui_impl_metal.mm missing" && exit 1)
+          echo "All ImGui files present."
 
-      - name: Install Theos dependencies
+      # ============================================================
+      # DOWNLOAD iOS SDK (reliable Theos SDK release)
+      # ============================================================
+      - name: Cache Theos SDKs
+        id: cache-sdks
+        uses: actions/cache@v4
+        with:
+          path: ~/theos-sdks
+          key: theos-sdks-v1
+
+      - name: Download iOS SDK
+        if: steps.cache-sdks.outputs.cache-hit != 'true'
         run: |
-          brew install ldid xz || true
-          brew install dpkg || true
+          mkdir -p ~/theos-sdks
+          cd ~/theos-sdks
+          echo "Downloading Theos SDK archive..."
+          curl -L -o sdks.tar.gz https://github.com/theos/sdks/archive/refs/heads/master.tar.gz
+          tar -xzf sdks.tar.gz
+          ls -la
+          # The tarball extracts to sdks-master/ containing all SDKs
+          ls -la sdks-master/ | head -40
 
-      - name: Download iOS SDK (device, not simulator)
+      - name: Prepare SDK path
         run: |
           mkdir -p $HOME/theos/sdks
-          cd $HOME/theos/sdks
-
-          if [ ! -d "iPhoneOS16.5.sdk" ]; then
-            curl -L -o iPhoneOS16.5.sdk.tar.xz \
-              https://github.com/theos/sdks/releases/download/master/iPhoneOS16.5.sdk.tar.xz || \
-            curl -L -o iPhoneOS16.5.sdk.tar.xz \
-              https://github.com/xamarin/xamarin-macios/raw/main/sdks/iPhoneOS16.5.sdk.tar.xz || \
-            echo "SDK download failed, Theos will try to fetch on demand"
-            tar -xf iPhoneOS16.5.sdk.tar.xz 2>/dev/null || true
+          # Copy all SDKs into theos/sdks
+          if [ -d "$HOME/theos-sdks/sdks-master" ]; then
+            cp -R $HOME/theos-sdks/sdks-master/* $HOME/theos/sdks/ 2>/dev/null || true
           fi
+          echo "Available SDKs:"
+          ls -la $HOME/theos/sdks/ || true
 
-          ls -la $HOME/theos/sdks/
-
-      - name: Prepare project structure
+      # ============================================================
+      # INSTALL BUILD DEPS
+      # ============================================================
+      - name: Install build dependencies
         run: |
-          mkdir -p build_output
-          echo "Project files:"
-          find . -maxdepth 3 -type f | head -50
+          brew install ldid xz || true
 
+      # ============================================================
+      # COMPILE
+      # ============================================================
       - name: Compile dylib
         run: |
-          SDK_PATH="$HOME/theos/sdks/iPhoneOS16.5.sdk"
-          if [ ! -d "$SDK_PATH" ]; then
-            SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null || echo "")
-          fi
+          # Pick the best available SDK
+          SDK_PATH=""
+          for candidate in \
+              "$HOME/theos/sdks/iPhoneOS16.5.sdk" \
+              "$HOME/theos/sdks/iPhoneOS16.4.sdk" \
+              "$HOME/theos/sdks/iPhoneOS16.1.sdk" \
+              "$HOME/theos/sdks/iPhoneOS15.6.sdk"; do
+            if [ -d "$candidate" ]; then
+              SDK_PATH="$candidate"
+              break
+            fi
+          done
 
-          echo "Using SDK: $SDK_PATH"
-
-          if [ -z "$SDK_PATH" ] || [ ! -d "$SDK_PATH" ]; then
-            echo "No iOS device SDK found. Trying xcrun..."
+          # Fallback to xcrun's iPhoneOS SDK
+          if [ -z "$SDK_PATH" ]; then
             SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null)
           fi
 
-          if [ -z "$SDK_PATH" ]; then
-            echo "ERROR: No iOS SDK available"
+          if [ -z "$SDK_PATH" ] || [ ! -d "$SDK_PATH" ]; then
+            echo "ERROR: No iOS SDK found"
+            ls -la $HOME/theos/sdks/ || true
             exit 1
           fi
 
-          echo "Final SDK path: $SDK_PATH"
+          echo "Using SDK: $SDK_PATH"
+          mkdir -p build_output
 
-          SRC_FILES=$(find . -maxdepth 1 -name "*.mm")
           OBJ_FILES=""
 
-          for src in $SRC_FILES; do
+          # --- Compile our source files ---
+          for src in ./STEntry.mm ./STMenu.mm; do
+            if [ ! -f "$src" ]; then
+              echo "WARN: $src not found, skipping"
+              continue
+            fi
             obj="build_output/$(basename ${src%.mm}).o"
             echo "Compiling $src -> $obj"
             clang++ -c \
@@ -118,7 +148,6 @@ jobs:
               -I. \
               -I./imgui \
               -I./imgui/backends \
-              -DIMGUI_IMPL_METAL \
               -O2 \
               -fvisibility=hidden \
               -o "$obj" \
@@ -126,30 +155,44 @@ jobs:
             OBJ_FILES="$OBJ_FILES $obj"
           done
 
-          IMGUI_SRCS="imgui/imgui.cpp imgui/imgui_draw.cpp imgui/imgui_tables.cpp imgui/imgui_widgets.cpp imgui/backends/imgui_impl_metal.mm"
-          for src in $IMGUI_SRCS; do
-            if [ -f "$src" ]; then
-              obj="build_output/$(basename ${src%.*}).o"
-              echo "Compiling $src -> $obj"
-              if [[ "$src" == *.mm ]]; then
-                clang++ -c -arch arm64 -arch arm64e -isysroot "$SDK_PATH" \
-                  -miphoneos-version-min=${{ env.IOS_MIN }} -fobjc-arc -fmodules -std=c++17 \
-                  -I. -I./imgui -I./imgui/backends -DIMGUI_IMPL_METAL -O2 \
-                  -o "$obj" "$src"
-              else
-                clang++ -c -arch arm64 -arch arm64e -isysroot "$SDK_PATH" \
-                  -miphoneos-version-min=${{ env.IOS_MIN }} -fmodules -std=c++17 \
-                  -I. -I./imgui -I./imgui/backends -DIMGUI_IMPL_METAL -O2 \
-                  -o "$obj" "$src"
-              fi
-              OBJ_FILES="$OBJ_FILES $obj"
-            else
-              echo "Skipping missing: $src"
+          # --- Compile ImGui core + backends ---
+          for src in \
+              imgui/imgui.cpp \
+              imgui/imgui_draw.cpp \
+              imgui/imgui_tables.cpp \
+              imgui/imgui_widgets.cpp \
+              imgui/backends/imgui_impl_metal.mm; do
+            if [ ! -f "$src" ]; then
+              echo "WARN: $src not found, skipping"
+              continue
             fi
+            obj="build_output/$(basename ${src%.*}).o"
+            echo "Compiling $src -> $obj"
+            clang++ -c \
+              -arch arm64 \
+              -arch arm64e \
+              -isysroot "$SDK_PATH" \
+              -miphoneos-version-min=${{ env.IOS_MIN }} \
+              -fobjc-arc \
+              -fmodules \
+              -std=c++17 \
+              -I. \
+              -I./imgui \
+              -I./imgui/backends \
+              -O2 \
+              -o "$obj" \
+              "$src"
+            OBJ_FILES="$OBJ_FILES $obj"
           done
 
-          echo "Object files: $OBJ_FILES"
+          echo ""
+          echo "Object files compiled:"
+          echo "$OBJ_FILES"
+          ls -la build_output/
 
+          # --- Link ---
+          echo ""
+          echo "Linking dylib..."
           clang++ -dynamiclib \
             -arch arm64 \
             -arch arm64e \
@@ -166,11 +209,13 @@ jobs:
             -o build_output/${{ env.DYLIB_NAME }}.dylib \
             $OBJ_FILES
 
+          echo "Built:"
+          file build_output/${{ env.DYLIB_NAME }}.dylib
+
       - name: Sign dylib with ldid (ad-hoc)
         run: |
           ldid -S build_output/${{ env.DYLIB_NAME }}.dylib || true
-          echo "Signed (ad-hoc):"
-          ldid -e build_output/${{ env.DYLIB_NAME }}.dylib | head -20 || true
+          echo "Signed (ad-hoc)."
 
       - name: Verify output
         run: |
