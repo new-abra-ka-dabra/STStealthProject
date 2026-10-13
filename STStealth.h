@@ -67,7 +67,9 @@ static inline void st_hide_image(const struct mach_header *mh) {
     for (uint32_t i = 0; i < count; i++) {
         const struct mach_header *h = _dyld_get_image_header(i);
         if (h == mh) {
-            struct st_hidden_image *node = malloc(sizeof(*node));
+            struct st_hidden_image *node =
+                (struct st_hidden_image *)malloc(sizeof(struct st_hidden_image));
+            if (!node) return;
             node->header = mh;
             node->path = _dyld_get_image_name(i);
             node->next = st_hidden_list;
